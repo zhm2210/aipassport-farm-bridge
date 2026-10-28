@@ -2,16 +2,19 @@
  * set_wifi.js — 给工牌下发 WiFi 凭据（换 WiFi 不用重新烧录固件）
  *
  * 用法：
- *   node tools/set_wifi.js                  自动：取本机当前连的 WiFi
- *   node tools/set_wifi.js <网络名>          从本机已保存的网络里取出密码再下发
- *   node tools/set_wifi.js <网络名> <密码>   直接指定
+ *   node tools/set_wifi.js <网络名> <密码>    手动指定
+ *   node tools/set_wifi.js                    交互式输入（密码不回显）
+ *
+ * ★ 本工具不会去读取电脑里保存的 WiFi 密码 —— 一律手动输入。
+ *   （不碰 netsh key=clear，不扫描本机已保存的网络）
  *
  * 原理：经桥接的 POST /send 把 {"t":"wificfg","ssid":..,"pass":..} 发给工牌，
  *      工牌存进 NVS 后立刻用新凭据重连。无线已断时自动改走 USB 串口通道。
  *
- * ⚠ ESP32-C3 只支持 2.4GHz，5G 网络连不上（名字里带 5G 的会先警告）。
+ * ⚠ ESP32-C3 只支持 2.4GHz，5G 网络连不上。
  */
 const http = require('http');
+const readline = require('readline');
 
 const BRIDGE_HOST = '127.0.0.1';
 const BRIDGE_PORT = 8899;
@@ -34,78 +37,42 @@ function postJSON(path, obj) {
   });
 }
 
-const isWin = process.platform === 'win32';
-
-function sh(cmd) {
-  // netsh 只认 GBK/本地代码页，先切到 65001 保证中文网络名不乱码
-  return require('child_process').execSync(
-    isWin ? `cmd /c "chcp 65001 >nul & ${cmd}"` : cmd,
-    { encoding: 'utf8', windowsHide: true }
-  );
-}
-
-/** 本机当前连接的 WiFi 名（没连就返回 null） */
-function currentSsid() {
-  if (!isWin) return null;
-  try {
-    const out = sh('netsh wlan show interfaces');
-    if (!/状态\s*:\s*已连接|State\s*:\s*connected/i.test(out)) return null;
-    // 行首是 SSID 才是网络名（BSSID 是路由器的 MAC，别匹配错）
-    const m = out.match(/^\s*SSID\s*:\s*(.+?)\s*$/m);
-    return m ? m[1].trim() : null;
-  } catch (e) { return null; }
-}
-
-/** 本机保存过的所有 WiFi 名 */
-function savedProfiles() {
-  if (!isWin) return [];
-  try {
-    const out = sh('netsh wlan show profile');
-    const list = [];
-    const re = /(?:所有用户配置文件|All User Profile)\s*:\s*(.+?)\s*$/gm;
-    let m;
-    while ((m = re.exec(out)) !== null) if (m[1].trim()) list.push(m[1].trim());
-    return list;
-  } catch (e) { return []; }
-}
-
-/** 取某个已保存网络的明文密码 */
-function profileKey(name) {
-  if (!isWin) return '';
-  try {
-    const out = sh(`netsh wlan show profile name="${name}" key=clear`);
-    const m = out.match(/(?:Key Content|关键内容)\s*:\s*(.+?)\s*$/m);
-    return m ? m[1].trim() : '';
-  } catch (e) { return ''; }
+/** 交互式提问；hidden=true 时不回显输入的字符 */
+function ask(question, hidden) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({
+      input: process.stdin, output: process.stdout, terminal: true,
+    });
+    if (hidden) rl._writeToOutput = function () {};   // 吞掉回显
+    process.stdout.write(question);                   // 提示语照常显示
+    rl.question('', (ans) => {
+      if (hidden) process.stdout.write('\n');
+      rl.close();
+      resolve((ans || '').trim());
+    });
+  });
 }
 
 (async () => {
   let ssid = process.argv[2];
   let pass = process.argv[3];
 
-  // 没给网络名 → 先取当前连接的
-  if (!ssid) {
-    const cur = currentSsid();
-    if (cur) {
-      ssid = cur;
-      console.log(`[setwifi] 本机当前连接：${ssid}`);
-    } else {
-      const list = savedProfiles();
-      console.error('[setwifi] 本机没连 WiFi（可能在用有线网）。');
-      if (list.length) {
-        console.error('  本机保存过这些网络，挑一个 2.4G 的：');
-        list.forEach((n) => console.error(`    node tools/set_wifi.js ${n}`));
-      }
-      console.error('  或直接指定：node tools/set_wifi.js <网络名> <密码>');
+  // 缺哪个问哪个 —— 全程手动，绝不自动读取本机保存的密码
+  if (!ssid || !pass) {
+    if (!process.stdin.isTTY) {
+      // 非交互环境（脚本/CI）：问不了，直接提示用法
+      console.error('[setwifi] 需要手动提供 WiFi 名称和密码。');
+      console.error('  用法：node tools/set_wifi.js <网络名> <密码>');
+      console.error('  （本工具不读取电脑里保存的 WiFi 密码）');
       process.exit(1);
     }
-  }
-
-  // 没给密码 → 从本机已保存的网络里取
-  if (!pass) {
-    pass = profileKey(ssid);
-    if (pass) console.log(`[setwifi] 已从本机取到「${ssid}」的密码`);
-    else console.warn(`[setwifi] 本机没保存「${ssid}」的密码，按无密码下发`);
+    if (!ssid) {
+      ssid = await ask('WiFi 名称：', false);
+      if (!ssid) { console.error('[setwifi] 未输入名称，已取消'); process.exit(1); }
+    }
+    if (!pass) {
+      pass = await ask('WiFi 密码（不回显；开放网络直接回车）：', true);
+    }
   }
 
   // ★ ESP32-C3 只支持 2.4GHz

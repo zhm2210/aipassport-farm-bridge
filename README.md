@@ -58,7 +58,7 @@ cp wifi_config.h.example wifi_config.h
 ```bash
 node tools/set_wifi.js <WiFi名> <密码>
 
-# Windows 下省略参数，自动取本机当前连的 WiFi：
+# 或者不带参数，交互式输入（密码不回显）：
 node tools/set_wifi.js
 ```
 
