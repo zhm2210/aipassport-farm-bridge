@@ -24,6 +24,7 @@ $ErrLog  = Join-Path $LogDir 'bridge_err.log'
 $TrayLog = Join-Path $LogDir 'tray.log'
 $IconPath = Join-Path $Root 'app.ico'
 $StateURL = 'http://127.0.0.1:8899/state'
+$SendURL  = 'http://127.0.0.1:8899/send'
 $RegPath  = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
 $RegName  = 'FarmBridgeTray'
 
@@ -144,6 +145,37 @@ $mLog.Add_Click({
 })
 $menu.MenuItems.Add($mLog) | Out-Null
 
+$mWifi = New-Object System.Windows.Forms.MenuItem -ArgumentList '设置工牌 WiFi…'
+$mWifi.Add_Click({
+  $d = Show-WifiDialog
+  if (-not $d.Ok) { return }
+  $ssid = $d.Ssid
+  if (-not $ssid) {
+    [System.Windows.Forms.MessageBox]::Show('WiFi 名称不能为空。', '农场桥接')
+    return
+  }
+  # ESP32-C3 只支持 2.4GHz
+  if ($ssid -match '5[Gg]') {
+    $ask = [System.Windows.Forms.MessageBox]::Show(
+      "「$ssid」像是 5G 网络，ESP32-C3 只支持 2.4GHz，可能连不上。`n`n仍要下发吗？",
+      '农场桥接', 'YesNo', 'Warning')
+    if ($ask -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+  }
+  try {
+    [void](Send-WifiCfg $ssid $d.Pass)
+    Write-TLog "已下发 WiFi 凭据 ssid=$ssid"
+    $notify.ShowBalloonTip(4000, '农场桥接', "已下发 WiFi「$ssid」，工牌正在重连",
+      [System.Windows.Forms.ToolTipIcon]::Info)   # 成功只冒泡泡，不弹窗打断
+    Update-Status
+  } catch {
+    Write-TLog ('下发 WiFi 失败: ' + $_.Exception.Message)
+    [System.Windows.Forms.MessageBox]::Show(
+      ('下发失败：' + $_.Exception.Message + "`n`n请确认桥接在跑、且工牌在线（无线或 USB 串口任一连通）。"),
+      '农场桥接')
+  }
+})
+$menu.MenuItems.Add($mWifi) | Out-Null
+
 $menu.MenuItems.Add((New-Object System.Windows.Forms.MenuItem -ArgumentList '-')) | Out-Null
 
 $mAuto = New-Object System.Windows.Forms.MenuItem -ArgumentList ('开机自动启动（' + $(if (Get-AutoStart) { '已开启' } else { '未开启' }) + '）')
@@ -208,6 +240,82 @@ $notify.ContextMenu = $menu
 
 # 双击图标 = 打开状态页
 $notify.Add_DoubleClick({ Start-Process $StateURL })
+
+# ---------- 设置工牌 WiFi ----------
+# 经桥接 /send 下发 wificfg：工牌存 NVS 后用新凭据重连（换 WiFi 不用重新烧录）
+function Send-WifiCfg([string]$ssid, [string]$pass) {
+  $body = (@{ t = 'wificfg'; ssid = $ssid; pass = $pass } | ConvertTo-Json -Compress)
+  return (Invoke-RestMethod -Uri $SendURL -Method Post -Body $body `
+    -ContentType 'application/json' -TimeoutSec 6)
+}
+
+# 弹窗收集 WiFi 名称与密码（密码默认遮罩，可勾选显示）
+# ★ 不读取本机保存的任何 WiFi 密码，一律由用户手动输入
+function Show-WifiDialog {
+  $f = New-Object System.Windows.Forms.Form
+  $f.Text = '设置工牌 WiFi'
+  $f.Size = New-Object System.Drawing.Size 380, 215
+  $f.StartPosition = 'CenterScreen'
+  $f.FormBorderStyle = 'FixedDialog'
+  $f.MaximizeBox = $false
+  $f.MinimizeBox = $false
+  $f.TopMost = $true
+
+  $lbl1 = New-Object System.Windows.Forms.Label
+  $lbl1.Text = 'WiFi 名称（SSID）：'
+  $lbl1.Location = New-Object System.Drawing.Point 20, 18
+  $lbl1.Size = New-Object System.Drawing.Size 320, 20
+  $f.Controls.Add($lbl1)
+
+  $tb1 = New-Object System.Windows.Forms.TextBox
+  $tb1.Location = New-Object System.Drawing.Point 20, 40
+  $tb1.Size = New-Object System.Drawing.Size 320, 25
+  $f.Controls.Add($tb1)
+
+  $lbl2 = New-Object System.Windows.Forms.Label
+  $lbl2.Text = '密码（工牌只支持 2.4GHz 网络）：'
+  $lbl2.Location = New-Object System.Drawing.Point 20, 72
+  $lbl2.Size = New-Object System.Drawing.Size 320, 20
+  $f.Controls.Add($lbl2)
+
+  $tb2 = New-Object System.Windows.Forms.TextBox
+  $tb2.Location = New-Object System.Drawing.Point 20, 94
+  $tb2.Size = New-Object System.Drawing.Size 320, 25
+  $tb2.UseSystemPasswordChar = $true
+  $f.Controls.Add($tb2)
+
+  $chk = New-Object System.Windows.Forms.CheckBox
+  $chk.Text = '显示密码'
+  $chk.Location = New-Object System.Drawing.Point 20, 124
+  $chk.Size = New-Object System.Drawing.Size 120, 20
+  $chk.Add_CheckedChanged({ $tb2.UseSystemPasswordChar = (-not $chk.Checked) })
+  $f.Controls.Add($chk)
+
+  $ok = New-Object System.Windows.Forms.Button
+  $ok.Text = '确定'
+  $ok.Location = New-Object System.Drawing.Point 180, 150
+  $ok.Size = New-Object System.Drawing.Size 78, 28
+  $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+  $f.Controls.Add($ok)
+  $f.AcceptButton = $ok
+
+  $cancel = New-Object System.Windows.Forms.Button
+  $cancel.Text = '取消'
+  $cancel.Location = New-Object System.Drawing.Point 262, 150
+  $cancel.Size = New-Object System.Drawing.Size 78, 28
+  $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+  $f.Controls.Add($cancel)
+  $f.CancelButton = $cancel
+
+  $res = $f.ShowDialog()
+  $ssid = $tb1.Text.Trim()
+  $pw   = $tb2.Text
+  $f.Dispose()
+  if ($res -eq [System.Windows.Forms.DialogResult]::OK) {
+    return @{ Ok = $true; Ssid = $ssid; Pass = $pw }
+  }
+  return @{ Ok = $false; Ssid = ''; Pass = '' }
+}
 
 # ---------- 状态刷新 ----------
 function New-DotIcon([string]$hex) {
