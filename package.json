@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server/bridge.js",
     "launch": "node server/launch.js",
+    "setwifi": "node tools/set_wifi.js",
     "ota": "node tools/ota_wifi.js",
     "font": "python tools/genfont.py",
     "tones": "python tools/preview_tones.py"

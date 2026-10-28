@@ -1385,6 +1385,27 @@ static void loadAlertPref() {
   if (g_toneFault  < 0 || g_toneFault  > 3) g_toneFault  = 0;
 }
 
+// ---- WiFi 凭据：桥接运行时下发，存 NVS，优先级高于编译期的 wifi_config.h ----
+static void saveWifiPref(const char* ssid, const char* pass) {
+  Preferences p;
+  p.begin("farm", false);
+  p.putString("wifi_ssid", ssid);
+  p.putString("wifi_pass", pass);
+  p.end();
+}
+/** 读出下发的凭据；没下发过返回 false（此时用编译期的） */
+static bool loadWifiPref(char* ssid, size_t ns, char* pass, size_t np) {
+  Preferences p;
+  p.begin("farm", true);
+  String s = p.getString("wifi_ssid", "");
+  String k = p.getString("wifi_pass", "");
+  p.end();
+  if (s.length() == 0) return false;   // 没配置过
+  strlcpy(ssid, s.c_str(), ns);
+  strlcpy(pass, k.c_str(), np);
+  return true;
+}
+
 /** 音量档位：OK 循环切换，每档都会响一声（方便直接听出差别）
  *  120 = 「超大」：DAC 仍锁 0dB（不削顶），靠数字端 tanh 软饱和再压响度
  *  （档位表 VOL_STEPS 定义在文件前面，画界面时也要用）
@@ -2183,6 +2204,25 @@ static void handleLine(const String& line) {
   // 无线升级：独立于业务命令处理，升级期间不解析别的
   if (!strcmp(t, "ota")) { handleOta(doc); return; }
   if (g_linkOta) return;
+
+  // 桥接下发 WiFi 凭据：存 NVS 后立刻用新凭据重连 —— 换 WiFi 不用重新烧录
+  if (!strcmp(t, "wificfg")) {
+    const char* ss = doc["ssid"] | "";
+    const char* pk = doc["pass"] | "";
+    if (ss[0]) {
+      saveWifiPref(ss, pk);
+      Serial.printf("[wifi] 收到下发凭据 ssid=%s，保存并重连\n", ss);
+      sendJson("{\"t\":\"wificfg\",\"ok\":1}");   // 先回 ack，再断链路
+      showToast("WiFi 已更新，重连中");
+      WiFi.disconnect(true);
+      g_wifiState = WIFI_IDLE;      // 回到 IDLE，状态机会用新凭据重新 wifiStart()
+      g_wifiRetryAt = 0;
+      g_udpReady = false;
+    } else {
+      sendJson("{\"t\":\"wificfg\",\"ok\":0,\"msg\":\"缺少 ssid\"}");
+    }
+    return;
+  }
   if (!strcmp(t, "state")) {
     // 诊断：首次收到 state 时回显前 160 字节，确认报文内容和 bid 字段
     static bool echoed = false;
@@ -2330,7 +2370,21 @@ static void wifiStart() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.setHostname("ai-passport");
-  WiFi.begin(WIFI_SSID, WIFI_PASS);   // WPA2-PSK（路由器兼容）
+  // 凭据优先级：桥接运行时下发的（NVS） > 编译期的 wifi_config.h
+  char ss[33] = {0}, pk[65] = {0};
+  if (loadWifiPref(ss, sizeof(ss), pk, sizeof(pk))) {
+    WiFi.begin(ss, pk);                 // 用桥接下发来的
+  } else if (strncmp(WIFI_SSID, "YOUR_", 5) == 0) {
+    // 既没下发过、编译期也是占位符：别傻连，明确告诉用户去配置
+    static bool warned = false;
+    if (!warned) { warned = true; showToast("未配置 WiFi：请用桥接下发"); }
+    Serial.println("[wifi] 未配置：NVS 无凭据且编译期为占位符");
+    g_wifiState = WIFI_FAIL;
+    g_wifiRetryAt = millis() + 30000;
+    return;
+  } else {
+    WiFi.begin(WIFI_SSID, WIFI_PASS);   // WPA2-PSK（路由器兼容）
+  }
   g_wifiState = WIFI_CONNECTING;
   g_wifiT0 = millis();
 }

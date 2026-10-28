@@ -51,6 +51,22 @@ cp wifi_config.h.example wifi_config.h
 
 > - `wifi_config.h` 已在 `.gitignore` 中，**真实密码不会进仓库**。
 > - 即使不创建它，固件也**照样能编译**（会回退到占位符，只是连不上网）。
+> - 既没下发过、编译期也是占位符时，工牌不会瞎连，会提示"未配置 WiFi"。
+
+**烧录后想换 WiFi？不用改代码、不用重新烧录** —— 让桥接直接下发：
+
+```bash
+node tools/set_wifi.js <WiFi名> <密码>
+
+# Windows 下省略参数，自动取本机当前连的 WiFi：
+node tools/set_wifi.js
+```
+
+工牌收到后把凭据存进 **NVS（掉电不丢）**，并立刻用新凭据重连。
+**凭据优先级：桥接下发的（NVS） > 编译期的 `wifi_config.h`**。
+
+> 换 WiFi 时无线会先断开；此时桥接会自动改走 **USB 串口**通道下发，
+> 所以建议保留 USB 连接作为兜底。
 
 ### 3. 烧录固件
 
