@@ -1,0 +1,32 @@
+{
+  "name": "aipassport-farm-bridge",
+  "version": "1.0.0",
+  "description": "把 AI Passport (ESP32-C3) 工牌变成拓竹 3D 打印机农场的口袋遥控器：桥接服务读取农场状态，经串口/无线下发给工牌显示、告警与控制",
+  "main": "server/bridge.js",
+  "scripts": {
+    "start": "node server/bridge.js",
+    "launch": "node server/launch.js",
+    "ota": "node tools/ota_wifi.js",
+    "font": "python tools/genfont.py",
+    "tones": "python tools/preview_tones.py"
+  },
+  "keywords": [
+    "bambu",
+    "bambu-lab",
+    "3d-printing",
+    "esp32-c3",
+    "printer-farm",
+    "remote-id",
+    "aipassport"
+  ],
+  "author": "zhm2210",
+  "license": "GPL-3.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@serialport/parser-readline": "^13.0.0",
+    "mqtt": "^5.16.1",
+    "serialport": "^13.0.0"
+  }
+}
