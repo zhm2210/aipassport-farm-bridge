@@ -149,9 +149,15 @@ function diffAndEvents(prev, cur) {
       }
       pushEvent(ev);
     }
-    // 打印中出现新的 HMS 错误也报
+    // 打印中新增 HMS：只有设备确实异常时才当故障上报。
+    // 否则多半是「热床保温 / 调平 / 校准中」这类**提示**（例如 code 196609），
+    // 不该红色报警打扰人 —— 这些信息仍保留在 /state 的 devices[].hms 里，可随时查。
+    // （农场 API 只给 code、不给严重级别，所以只能用设备状态来判。）
     if (p.hms.length !== d.hms.length && d.hms.length > p.hms.length) {
-      pushEvent({ kind: 'hms', dev: d.name, reason: d.hms.map(h => `${h.code}:${h.msg || '?'}`).join('; ') });
+      const abnormal = (d.state === 'FAILED' || d.state === 'PAUSE' || d.state === 'PAUSED' || d.printError > 0);
+      if (abnormal) {
+        pushEvent({ kind: 'hms', dev: d.name, reason: d.hms.map(h => `${h.code}:${h.msg || '?'}`).join('; ') });
+      }
     }
   }
 }
