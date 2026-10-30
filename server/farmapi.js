@@ -16,6 +16,7 @@
  *   （真实客户端对 bulk-start 会加密 body，但我们不需要——服务端照样处理明文）
  */
 const tls = require('tls');
+const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
@@ -26,8 +27,17 @@ const CRED = path.join(ROOT, 'credentials');
 const CHAIN = fs.readFileSync(path.join(CRED, 'client_chain.pem'), 'utf8');
 const KEY = fs.readFileSync(path.join(CRED, 'client_key.pem'), 'utf8');
 
-const FARM_HOST = '192.168.144.1';
+// 农场本地服务地址（mTLS，8888）：
+//   旧版 Bambu Farm Manager 会建 192.168.144.1 虚拟网卡并在其上开接口；
+//   新版客户端可能只绑 ::（不再建该虚拟网卡）—— 此时 192.168.144.1 根本不存在，
+//   请求全部失败，还会被误当成“sec-ts 失效”而把候选逐个耗尽。
+//   所以改为依次探测候选地址，用第一个 TCP 能连上的。
+//   要固定地址就设环境变量 FARM_HOST=x.x.x.x
 const FARM_PORT = 8888;
+const FARM_HOST_CANDIDATES = (process.env.FARM_HOST || '127.0.0.1,192.168.144.1,localhost')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+let FARM_HOST = FARM_HOST_CANDIDATES[0];
+let farmHostProbed = false;
 const SNI = 'farm_server.bambulab.com';
 const SERVER_ID = '2d0f7379-8c26-4065-b25b-2ac942d3bd42ffc3';
 
@@ -51,6 +61,7 @@ let sectPool = [];       // 候选 sec-ts（内存提取的，可能有过期的
 let sectInUse = null;    // 当前验证可用的
 let jwt = null;          // 当前 JWT
 let lastExtract = 0;
+let everExtracted = false;   // 曾成功提取过？用来区分“客户端没运行”和“候选被耗光”
 const EXTRACT_MIN_INTERVAL = 10 * 1000; // 两次提取最小间隔
 
 function pickFreshestJwt(cands) {
@@ -90,6 +101,7 @@ function extractCredentials(force = false) {
       sectPool = j.sects.map(s => s.val).filter(v => v && v.length >= 40);
       sectPool.reverse(); // 新提取的值优先放前面
       sectInUse = null;
+      if (sectPool.length) everExtracted = true;
       console.log(`[farmapi] extracted ${sectPool.length} sec-ts candidates from client pid ${j.pid}`);
     }
     if (j.jwts && j.jwts.length) {
@@ -111,6 +123,35 @@ function extractCredentials(force = false) {
 }
 
 // ---------- HTTP over mTLS ----------
+/** TCP 探活：这个地址的 8888 连得上吗 */
+function probeHost(host, timeoutMs = 1200) {
+  return new Promise((resolve) => {
+    const s = net.connect({ host, port: FARM_PORT });
+    const done = (ok) => { try { s.destroy(); } catch (e) { } resolve(ok); };
+    s.setTimeout(timeoutMs);
+    s.once('connect', () => done(true));
+    s.once('timeout', () => done(false));
+    s.once('error', () => done(false));
+  });
+}
+
+/** 挑出真正能连上的农场地址（只探测一次，结果缓存） */
+async function ensureFarmHost() {
+  if (farmHostProbed) return FARM_HOST;
+  for (const h of FARM_HOST_CANDIDATES) {
+    if (await probeHost(h)) {
+      FARM_HOST = h;
+      farmHostProbed = true;
+      console.log(`[farmapi] 农场服务地址：${h}:${FARM_PORT}`);
+      return FARM_HOST;
+    }
+  }
+  farmHostProbed = true;
+  console.error('[farmapi] ⚠ 候选地址都连不上 8888：' + FARM_HOST_CANDIDATES.join(' / ') +
+    '（请确认 Bambu Farm Manager 客户端已启动）');
+  return FARM_HOST;
+}
+
 function rawRequest(method, reqPath, body, extraHeaders = []) {
   return new Promise((resolve, reject) => {
     const sock = tls.connect({
@@ -182,6 +223,7 @@ function rawRequest(method, reqPath, body, extraHeaders = []) {
  * 401 = JWT 过期 → 重新提取
  */
 async function api(method, reqPath, body, extraHeaders = []) {
+  await ensureFarmHost();   // 请求前确认农场地址可达（探测结果会缓存）
   if (jwtExpired()) extractCredentials(true);
   if (!sectInUse && sectPool.length === 0) extractCredentials(true);
 
@@ -189,7 +231,15 @@ async function api(method, reqPath, body, extraHeaders = []) {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (!sectInUse) {
       if (sectPool.length === 0) extractCredentials(true);
-      if (sectPool.length === 0) throw new Error('no sec-ts candidates (client process not running?)');
+      if (sectPool.length === 0) {
+        // 这两种情况必须分开说，否则排查时会被严重误导：
+        //   从没提取到过   → 客户端确实没在运行
+        //   提取到但全用光 → 多半是连不上农场服务（地址/端口不通）
+        if (everExtracted) {
+          throw new Error('sec-ts 候选已全部试完且都失败（连不上农场服务 ' + FARM_HOST + ':' + FARM_PORT + '？）');
+        }
+        throw new Error('no sec-ts candidates (client process not running?)');
+      }
       sectInUse = sectPool.shift();
     }
     let r;
